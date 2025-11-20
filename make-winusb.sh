@@ -91,13 +91,10 @@ echo "📦 USB mounted at: $USB_PATH"
 
 ### 3. Mount the ISO
 echo "💿 Mounting ISO image..."
-hdiutil mount "$ISO_PATH" | grep "/Volumes/" || { echo "❌ Failed to mount ISO."; exit 1; }
+ISO_PATH_MOUNTED=$(hdiutil mount "$ISO_PATH" | grep "/Volumes/" | awk -F '\t' '{print $3}' | tail -n 1)
 
-ISO_MOUNT=$(ls "$MOUNT_DIR" | grep -iE 'CCCOMA|Win|ESD' | head -n 1)
-ISO_PATH_MOUNTED="$MOUNT_DIR/$ISO_MOUNT"
-
-if [ ! -d "$ISO_PATH_MOUNTED" ]; then
-  echo "❌ Could not find mounted ISO volume."
+if [ -z "$ISO_PATH_MOUNTED" ] || [ ! -d "$ISO_PATH_MOUNTED" ]; then
+  echo "❌ Failed to mount ISO or could not find mounted volume."
   exit 1
 fi
 echo "📁 ISO mounted at: $ISO_PATH_MOUNTED"

@@ -5,7 +5,9 @@ set -e
 ### === CONFIGURATION === ###
 ISO_PATH=""  # Leave empty to prompt
 MOUNT_DIR="/Volumes"
-FORMAT_TYPE=""  # Leave empty to prompt (EXFAT or FAT32)
+BIOS_MODE=""  # Leave empty to prompt (UEFI or CSM)
+FORMAT_TYPE=""  # Auto-determined based on BIOS_MODE
+PARTITION_TABLE=""  # Auto-determined based on BIOS_MODE
 ### ====================== ###
 
 # Note: Script will prompt for sudo password when needed for disk operations
@@ -26,27 +28,47 @@ else
   fi
 fi
 
-# Prompt for format type if not set
-if [ -z "$FORMAT_TYPE" ]; then
+# Prompt for BIOS mode if not set
+if [ -z "$BIOS_MODE" ]; then
   echo ""
-  echo "📋 Choose USB format type:"
-  echo "   1. exFAT + GPT (Recommended - UEFI only, no file size limits)"
-  echo "      → For modern PCs (2012+), BIOS must be in UEFI mode"
-  echo "   2. FAT32 + MBR (Legacy - BIOS/CSM compatible, 4GB file limit, slower)"
-  echo "      → For old PCs or BIOS in CSM/Legacy mode"
+  echo "📋 What BIOS mode will you use to boot?"
   echo ""
-  read -p "Enter choice (1 or 2): " format_choice
+  echo "   1. UEFI (Recommended - Modern PCs, 2012+)"
+  echo "      → Faster, no file size limits"
+  echo "      → Uses: exFAT format + GPT partition table"
+  echo "      → BIOS must be set to UEFI mode (NOT CSM/Legacy)"
+  echo ""
+  echo "   2. CSM/Legacy BIOS (Old PCs or compatibility mode)"
+  echo "      → Slower, requires splitting large files"
+  echo "      → Uses: FAT32 format + MBR partition table"
+  echo "      → Works with any BIOS mode"
+  echo ""
+  read -p "Enter choice (1 or 2): " bios_choice
   
-  if [ "$format_choice" = "1" ]; then
+  if [ "$bios_choice" = "1" ]; then
+    BIOS_MODE="UEFI"
     FORMAT_TYPE="EXFAT"
-  elif [ "$format_choice" = "2" ]; then
+    PARTITION_TABLE="GPT"
+    echo "✅ Selected: UEFI mode (exFAT + GPT)"
+  elif [ "$bios_choice" = "2" ]; then
+    BIOS_MODE="CSM"
     FORMAT_TYPE="FAT32"
+    PARTITION_TABLE="MBR"
+    echo "✅ Selected: CSM/Legacy mode (FAT32 + MBR)"
   else
     echo "❌ Invalid choice. Exiting."
     exit 1
   fi
 else
-  echo "📁 FORMAT_TYPE is set to: $FORMAT_TYPE"
+  echo "📁 BIOS_MODE is set to: $BIOS_MODE"
+  # Auto-determine format and partition table
+  if [ "$BIOS_MODE" = "UEFI" ]; then
+    FORMAT_TYPE="EXFAT"
+    PARTITION_TABLE="GPT"
+  else
+    FORMAT_TYPE="FAT32"
+    PARTITION_TABLE="MBR"
+  fi
 fi
 
 ### 2. Mount and validate ISO early
@@ -189,12 +211,16 @@ if [[ "$confirm" != "yes" && "$confirm" != "y" ]]; then
 fi
 
 ### 1. Erase USB with chosen format and partition table
-if [ "$FORMAT_TYPE" = "EXFAT" ]; then
-  echo "🧼 Erasing USB drive and formatting as exFAT with GPT (for UEFI)..."
-  sudo diskutil eraseDisk ExFAT "WINUSB" GPT "$USB_DISK"
+if [ "$BIOS_MODE" = "UEFI" ]; then
+  echo "🧼 Erasing USB drive..."
+  echo "   Format: exFAT (no 4GB limit)"
+  echo "   Partition: GPT (for UEFI boot)"
+  sudo diskutil eraseDisk ExFAT "WINUSB" "$PARTITION_TABLE" "$USB_DISK"
 else
-  echo "🧼 Erasing USB drive and formatting as FAT32 with MBR (for BIOS/CSM)..."
-  sudo diskutil eraseDisk MS-DOS "WINUSB" MBR "$USB_DISK"
+  echo "🧼 Erasing USB drive..."
+  echo "   Format: FAT32 (will split large files)"
+  echo "   Partition: MBR (for CSM/Legacy BIOS)"
+  sudo diskutil eraseDisk MS-DOS "WINUSB" "$PARTITION_TABLE" "$USB_DISK"
 fi
 
 ### 2. Detect mounted volume path more reliably
@@ -269,16 +295,22 @@ hdiutil unmount "$ISO_PATH_MOUNTED" || echo "⚠️  Failed to unmount ISO."
 echo ""
 echo "🎉 DONE: Bootable Windows USB created successfully!"
 echo ""
-if [ "$FORMAT_TYPE" = "EXFAT" ]; then
-  echo "⚙️  BIOS SETTINGS REQUIRED:"
-  echo "   1. Enter BIOS (usually DEL or F2 key during boot)"
-  echo "   2. Set Boot Mode to: UEFI (NOT CSM/Legacy)"
-  echo "   3. Disable Secure Boot if installation fails"
-  echo "   4. Save settings and boot from USB"
+if [ "$BIOS_MODE" = "UEFI" ]; then
+  echo "⚙️  IMPORTANT - BIOS SETTINGS REQUIRED:"
+  echo "   1. Restart PC and enter BIOS (usually DEL or F2 key)"
+  echo "   2. Find 'Boot Mode' setting (under Boot or Advanced tab)"
+  echo "   3. Set Boot Mode to: UEFI"
+  echo "   4. Make sure it's NOT set to: CSM, Legacy, or Legacy+UEFI"
+  echo "   5. Disable Secure Boot if Windows installation fails"
+  echo "   6. Save settings and boot from USB"
+  echo ""
+  echo "   ⚠️  This USB will NOT work in CSM/Legacy mode!"
 else
   echo "⚙️  BIOS SETTINGS:"
-  echo "   - Boot Mode: CSM/Legacy or UEFI (both work)"
-  echo "   - Boot from USB drive"
+  echo "   1. Boot Mode: CSM/Legacy (or UEFI with CSM enabled)"
+  echo "   2. Select USB drive from boot menu"
+  echo ""
+  echo "   ℹ️  This USB works in any BIOS mode"
 fi
 echo ""
 echo "🚀 Ready to install Windows!"

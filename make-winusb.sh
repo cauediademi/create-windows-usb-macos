@@ -30,8 +30,10 @@ fi
 if [ -z "$FORMAT_TYPE" ]; then
   echo ""
   echo "📋 Choose USB format type:"
-  echo "   1. exFAT (Recommended - UEFI only, no file size limits)"
-  echo "   2. FAT32 (Legacy - BIOS compatible, 4GB file limit, slower)"
+  echo "   1. exFAT + GPT (Recommended - UEFI only, no file size limits)"
+  echo "      → For modern PCs (2012+), BIOS must be in UEFI mode"
+  echo "   2. FAT32 + MBR (Legacy - BIOS/CSM compatible, 4GB file limit, slower)"
+  echo "      → For old PCs or BIOS in CSM/Legacy mode"
   echo ""
   read -p "Enter choice (1 or 2): " format_choice
   
@@ -186,12 +188,12 @@ if [[ "$confirm" != "yes" && "$confirm" != "y" ]]; then
   exit 1
 fi
 
-### 1. Erase USB with chosen format
+### 1. Erase USB with chosen format and partition table
 if [ "$FORMAT_TYPE" = "EXFAT" ]; then
-  echo "🧼 Erasing USB drive and formatting as exFAT..."
-  sudo diskutil eraseDisk ExFAT "WINUSB" MBR "$USB_DISK"
+  echo "🧼 Erasing USB drive and formatting as exFAT with GPT (for UEFI)..."
+  sudo diskutil eraseDisk ExFAT "WINUSB" GPT "$USB_DISK"
 else
-  echo "🧼 Erasing USB drive and formatting as FAT32..."
+  echo "🧼 Erasing USB drive and formatting as FAT32 with MBR (for BIOS/CSM)..."
   sudo diskutil eraseDisk MS-DOS "WINUSB" MBR "$USB_DISK"
 fi
 
@@ -266,4 +268,17 @@ hdiutil unmount "$ISO_PATH_MOUNTED" || echo "⚠️  Failed to unmount ISO."
 
 echo ""
 echo "🎉 DONE: Bootable Windows USB created successfully!"
-echo "   You can now use this USB to install Windows on a PC."
+echo ""
+if [ "$FORMAT_TYPE" = "EXFAT" ]; then
+  echo "⚙️  BIOS SETTINGS REQUIRED:"
+  echo "   1. Enter BIOS (usually DEL or F2 key during boot)"
+  echo "   2. Set Boot Mode to: UEFI (NOT CSM/Legacy)"
+  echo "   3. Disable Secure Boot if installation fails"
+  echo "   4. Save settings and boot from USB"
+else
+  echo "⚙️  BIOS SETTINGS:"
+  echo "   - Boot Mode: CSM/Legacy or UEFI (both work)"
+  echo "   - Boot from USB drive"
+fi
+echo ""
+echo "🚀 Ready to install Windows!"

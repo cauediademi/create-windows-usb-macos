@@ -7,12 +7,7 @@ ISO_PATH=""  # Leave empty to prompt
 MOUNT_DIR="/Volumes"
 ### ====================== ###
 
-# Require sudo
-if [[ $EUID -ne 0 ]]; then
-  echo "⚠️  Please run this script with sudo:"
-  echo "    sudo $0"
-  exit 1
-fi
+# Note: Script will prompt for sudo password when needed for disk operations
 
 # Prompt for ISO if not set
 if [ -z "$ISO_PATH" ]; then
@@ -33,7 +28,6 @@ fi
 echo "🔍 Scanning for USB drives..."
 
 CANDIDATES=($(diskutil list external | grep '^/dev/' | awk '{print $1}'))
-
 
 if [ ${#CANDIDATES[@]} -eq 0 ]; then
   echo "🔌 No USB drive detected. Please insert one and press Enter..."
@@ -68,10 +62,9 @@ if [[ "$confirm" != "yes" && "$confirm" != "y" ]]; then
   exit 1
 fi
 
-
 ### 1. Erase USB as FAT32 with MBR
 echo "🧼 Erasing USB drive..."
-diskutil eraseDisk MS-DOS "WINUSB" MBR "$USB_DISK"
+sudo diskutil eraseDisk MS-DOS "WINUSB" MBR "$USB_DISK"
 
 ### 2. Detect mounted volume path more reliably
 echo "🔍 Detecting mounted USB volume..."
@@ -101,14 +94,13 @@ echo "📁 ISO mounted at: $ISO_PATH_MOUNTED"
 
 ### 4. Copy all ISO files except install.wim
 echo "📤 Copying ISO files (excluding install.wim)..."
-if ! rsync -avh --progress \
+if ! sudo rsync -avh --progress \
   --no-perms --no-owner --no-group --inplace \
   --exclude=sources/install.wim \
   "$ISO_PATH_MOUNTED"/ "$USB_PATH"/; then
   echo "❌ File copy failed. Aborting."
   exit 1
 fi
-
 
 ### 5. Ensure wimlib is installed
 if ! command -v wimlib-imagex &> /dev/null; then
@@ -118,17 +110,17 @@ fi
 
 ### 6. Split install.wim to fit FAT32
 echo "🪓 Splitting install.wim to .swm format for FAT32..."
-wimlib-imagex split "$ISO_PATH_MOUNTED/sources/install.wim" "$USB_PATH/sources/install.swm" 4000
+sudo wimlib-imagex split "$ISO_PATH_MOUNTED/sources/install.wim" "$USB_PATH/sources/install.swm" 4000
 
 ### 7. Clean up any leftover install.wim
 if [ -f "$USB_PATH/sources/install.wim" ]; then
   echo "🧹 Removing install.wim..."
-  rm "$USB_PATH/sources/install.wim"
+  sudo rm "$USB_PATH/sources/install.wim"
 fi
 
 ### 8. Eject USB
 echo "📤 Ejecting USB drive..."
-diskutil eject "$USB_DISK"
+sudo diskutil eject "$USB_DISK"
 
 echo "🔽 Unmounting ISO image..."
 hdiutil unmount "$ISO_PATH_MOUNTED" || echo "⚠️  Failed to unmount ISO."

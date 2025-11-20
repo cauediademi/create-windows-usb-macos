@@ -5,6 +5,7 @@ set -e
 ### === CONFIGURATION === ###
 ISO_PATH=""  # Leave empty to prompt
 MOUNT_DIR="/Volumes"
+FORMAT_TYPE=""  # Leave empty to prompt (EXFAT or FAT32)
 ### ====================== ###
 
 # Note: Script will prompt for sudo password when needed for disk operations
@@ -24,6 +25,108 @@ else
     exit 1
   fi
 fi
+
+# Prompt for format type if not set
+if [ -z "$FORMAT_TYPE" ]; then
+  echo ""
+  echo "📋 Choose USB format type:"
+  echo "   1. exFAT (Recommended - UEFI only, no file size limits)"
+  echo "   2. FAT32 (Legacy - BIOS compatible, 4GB file limit, slower)"
+  echo ""
+  read -p "Enter choice (1 or 2): " format_choice
+  
+  if [ "$format_choice" = "1" ]; then
+    FORMAT_TYPE="EXFAT"
+  elif [ "$format_choice" = "2" ]; then
+    FORMAT_TYPE="FAT32"
+  else
+    echo "❌ Invalid choice. Exiting."
+    exit 1
+  fi
+else
+  echo "📁 FORMAT_TYPE is set to: $FORMAT_TYPE"
+fi
+
+### 2. Mount and validate ISO early
+echo "💿 Mounting ISO image..."
+
+# Mount ISO and extract mount point directly
+ISO_PATH_MOUNTED=$(hdiutil mount "$ISO_PATH" 2>&1 | grep -o '/Volumes/.*' | head -n 1)
+
+# Fallback: parse the tab-separated output
+if [ -z "$ISO_PATH_MOUNTED" ]; then
+  ISO_PATH_MOUNTED=$(hdiutil mount "$ISO_PATH" 2>&1 | awk '/\/Volumes\// {for(i=1;i<=NF;i++) if($i ~ /^\/Volumes\//) print $i}' | head -n 1)
+fi
+
+# Fallback: check most recently mounted volume
+if [ -z "$ISO_PATH_MOUNTED" ]; then
+  sleep 2
+  ISO_PATH_MOUNTED=$(mount | grep "/Volumes/" | tail -n 1 | awk '{print $3}')
+fi
+
+# Final validation
+if [ -z "$ISO_PATH_MOUNTED" ] || [ ! -d "$ISO_PATH_MOUNTED" ]; then
+  echo "❌ Failed to mount ISO or could not detect mounted volume."
+  echo "   Please check if the ISO file is valid."
+  exit 1
+fi
+
+echo "📁 ISO mounted at: $ISO_PATH_MOUNTED"
+
+### 2.5. Pre-flight validation checks
+echo ""
+echo "🔍 Running pre-flight validation checks..."
+
+# Check which install file exists and get its size
+if [ -f "$ISO_PATH_MOUNTED/sources/install.wim" ]; then
+  INSTALL_FILE="install.wim"
+  INSTALL_SIZE=$(stat -f%z "$ISO_PATH_MOUNTED/sources/install.wim" 2>/dev/null || stat -c%s "$ISO_PATH_MOUNTED/sources/install.wim" 2>/dev/null)
+  INSTALL_SIZE_MB=$((INSTALL_SIZE / 1024 / 1024))
+  echo "✅ Found: sources/$INSTALL_FILE (${INSTALL_SIZE_MB}MB)"
+elif [ -f "$ISO_PATH_MOUNTED/sources/install.esd" ]; then
+  INSTALL_FILE="install.esd"
+  INSTALL_SIZE=$(stat -f%z "$ISO_PATH_MOUNTED/sources/install.esd" 2>/dev/null || stat -c%s "$ISO_PATH_MOUNTED/sources/install.esd" 2>/dev/null)
+  INSTALL_SIZE_MB=$((INSTALL_SIZE / 1024 / 1024))
+  echo "✅ Found: sources/$INSTALL_FILE (${INSTALL_SIZE_MB}MB)"
+else
+  echo "❌ Neither install.wim nor install.esd found in ISO."
+  echo "   This may not be a valid Windows installation ISO."
+  hdiutil unmount "$ISO_PATH_MOUNTED" 2>/dev/null
+  exit 1
+fi
+
+# Check if wimlib is available ONLY if using FAT32
+if [ "$FORMAT_TYPE" = "FAT32" ]; then
+  echo "🔍 Checking for wimlib-imagex (required for FAT32)..."
+  if ! command -v wimlib-imagex &> /dev/null; then
+    echo "⚠️  wimlib-imagex is required to split large install files for FAT32."
+    echo "📦 Installing wimlib now..."
+    if ! brew install wimlib; then
+      echo "❌ Failed to install wimlib. Cannot proceed."
+      echo "   Please install manually: brew install wimlib"
+      hdiutil unmount "$ISO_PATH_MOUNTED" 2>/dev/null
+      exit 1
+    fi
+    if ! command -v wimlib-imagex &> /dev/null; then
+      echo "❌ wimlib installation completed but wimlib-imagex not found."
+      hdiutil unmount "$ISO_PATH_MOUNTED" 2>/dev/null
+      exit 1
+    fi
+  fi
+  echo "✅ wimlib-imagex is available"
+else
+  echo "✅ Using exFAT - no file splitting required"
+fi
+
+# Calculate total ISO size
+echo "🔍 Calculating ISO size..."
+ISO_TOTAL_SIZE_KB=$(du -sk "$ISO_PATH_MOUNTED" | awk '{print $1}')
+ISO_TOTAL_SIZE_MB=$((ISO_TOTAL_SIZE_KB / 1024))
+ISO_TOTAL_SIZE_GB=$((ISO_TOTAL_SIZE_MB / 1024))
+echo "📊 ISO total size: ${ISO_TOTAL_SIZE_GB}GB (${ISO_TOTAL_SIZE_MB}MB)"
+
+echo "✅ All pre-flight checks passed!"
+echo ""
 
 echo "🔍 Scanning for USB drives..."
 
@@ -54,6 +157,27 @@ else
   USB_DISK="${CANDIDATES[$((choice-1))]}"
 fi
 
+# Check USB capacity vs ISO size
+DISK_SIZE_BYTES=$(diskutil info "$USB_DISK" | awk -F '[()]' '/Disk Size/ && !/Total/ { print $2 }' | awk '{print $1}')
+DISK_SIZE_GB=$((DISK_SIZE_BYTES / 1000 / 1000 / 1000))
+DISK_SIZE_USABLE_GB=$((DISK_SIZE_GB * 95 / 100))  # Account for formatting overhead
+echo "📊 USB capacity: ${DISK_SIZE_GB}GB (usable: ~${DISK_SIZE_USABLE_GB}GB after formatting)"
+
+# Compare sizes
+if [ $ISO_TOTAL_SIZE_GB -gt $DISK_SIZE_USABLE_GB ]; then
+  echo ""
+  echo "⚠️  WARNING: ISO size (${ISO_TOTAL_SIZE_GB}GB) might be larger than USB capacity (~${DISK_SIZE_USABLE_GB}GB)"
+  read -p "❓ Continue anyway? (yes/no): " continue_choice
+  if [ "$continue_choice" != "yes" ]; then
+    echo "Aborted by user."
+    hdiutil unmount "$ISO_PATH_MOUNTED" 2>/dev/null
+    exit 1
+  fi
+else
+  echo "✅ USB has sufficient space for this ISO"
+fi
+
+echo ""
 echo "🚨 WARNING: This will ERASE EVERYTHING on $USB_DISK"
 read -p "Type YES to continue: " confirm
 confirm=$(echo "$confirm" | tr '[:upper:]' '[:lower:]')
@@ -62,9 +186,14 @@ if [[ "$confirm" != "yes" && "$confirm" != "y" ]]; then
   exit 1
 fi
 
-### 1. Erase USB as FAT32 with MBR
-echo "🧼 Erasing USB drive..."
-sudo diskutil eraseDisk MS-DOS "WINUSB" MBR "$USB_DISK"
+### 1. Erase USB with chosen format
+if [ "$FORMAT_TYPE" = "EXFAT" ]; then
+  echo "🧼 Erasing USB drive and formatting as exFAT..."
+  sudo diskutil eraseDisk ExFAT "WINUSB" MBR "$USB_DISK"
+else
+  echo "🧼 Erasing USB drive and formatting as FAT32..."
+  sudo diskutil eraseDisk MS-DOS "WINUSB" MBR "$USB_DISK"
+fi
 
 ### 2. Detect mounted volume path more reliably
 echo "🔍 Detecting mounted USB volume..."
@@ -82,47 +211,59 @@ fi
 
 echo "📦 USB mounted at: $USB_PATH"
 
-### 3. Mount the ISO
-echo "💿 Mounting ISO image..."
-ISO_PATH_MOUNTED=$(hdiutil mount "$ISO_PATH" | grep "/Volumes/" | awk -F '\t' '{print $3}' | tail -n 1)
-
-if [ -z "$ISO_PATH_MOUNTED" ] || [ ! -d "$ISO_PATH_MOUNTED" ]; then
-  echo "❌ Failed to mount ISO or could not find mounted volume."
-  exit 1
+### 3. Copy ISO files based on format type
+if [ "$FORMAT_TYPE" = "EXFAT" ]; then
+  echo "📤 Copying ALL ISO files (exFAT has no file size limits)..."
+  echo "   This will take several minutes..."
+  if ! sudo rsync -avh --progress \
+    --no-perms --no-owner --no-group --inplace \
+    "$ISO_PATH_MOUNTED"/ "$USB_PATH"/; then
+    echo "❌ File copy failed. Aborting."
+    hdiutil unmount "$ISO_PATH_MOUNTED" 2>/dev/null
+    exit 1
+  fi
+  echo "✅ All files copied successfully!"
+else
+  # FAT32: Exclude large files and split them
+  echo "📤 Copying ISO files (excluding large install.wim/install.esd files)..."
+  echo "   This will take several minutes..."
+  if ! sudo rsync -avh --progress \
+    --no-perms --no-owner --no-group --inplace \
+    --exclude='sources/install.wim' \
+    --exclude='sources/install.esd' \
+    "$ISO_PATH_MOUNTED"/ "$USB_PATH"/; then
+    echo "❌ File copy failed. Aborting."
+    hdiutil unmount "$ISO_PATH_MOUNTED" 2>/dev/null
+    exit 1
+  fi
+  
+  ### 4. Split large install file to fit FAT32 (4GB limit)
+  echo "🪓 Splitting sources/$INSTALL_FILE to .swm format for FAT32..."
+  echo "   This may take 10-15 minutes for large files..."
+  if ! sudo wimlib-imagex split "$ISO_PATH_MOUNTED/sources/$INSTALL_FILE" "$USB_PATH/sources/install.swm" 4000; then
+    echo "❌ Failed to split $INSTALL_FILE"
+    hdiutil unmount "$ISO_PATH_MOUNTED" 2>/dev/null
+    exit 1
+  fi
+  
+  ### 5. Clean up any leftover install files
+  if [ -f "$USB_PATH/sources/install.wim" ]; then
+    echo "🧹 Removing leftover install.wim..."
+    sudo rm "$USB_PATH/sources/install.wim"
+  fi
+  if [ -f "$USB_PATH/sources/install.esd" ]; then
+    echo "🧹 Removing leftover install.esd..."
+    sudo rm "$USB_PATH/sources/install.esd"
+  fi
 fi
-echo "📁 ISO mounted at: $ISO_PATH_MOUNTED"
 
-### 4. Copy all ISO files except install.wim
-echo "📤 Copying ISO files (excluding install.wim)..."
-if ! sudo rsync -avh --progress \
-  --no-perms --no-owner --no-group --inplace \
-  --exclude=sources/install.wim \
-  "$ISO_PATH_MOUNTED"/ "$USB_PATH"/; then
-  echo "❌ File copy failed. Aborting."
-  exit 1
-fi
-
-### 5. Ensure wimlib is installed
-if ! command -v wimlib-imagex &> /dev/null; then
-  echo "🔧 Installing wimlib (requires Homebrew)..."
-  brew install wimlib
-fi
-
-### 6. Split install.wim to fit FAT32
-echo "🪓 Splitting install.wim to .swm format for FAT32..."
-sudo wimlib-imagex split "$ISO_PATH_MOUNTED/sources/install.wim" "$USB_PATH/sources/install.swm" 4000
-
-### 7. Clean up any leftover install.wim
-if [ -f "$USB_PATH/sources/install.wim" ]; then
-  echo "🧹 Removing install.wim..."
-  sudo rm "$USB_PATH/sources/install.wim"
-fi
-
-### 8. Eject USB
+### 6. Eject USB and cleanup
 echo "📤 Ejecting USB drive..."
 sudo diskutil eject "$USB_DISK"
 
 echo "🔽 Unmounting ISO image..."
 hdiutil unmount "$ISO_PATH_MOUNTED" || echo "⚠️  Failed to unmount ISO."
 
+echo ""
 echo "🎉 DONE: Bootable Windows USB created successfully!"
+echo "   You can now use this USB to install Windows on a PC."
